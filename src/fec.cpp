@@ -18,6 +18,9 @@
  *
 */
 
+#include <cstring>
+#include <assert.h>
+
 /*
  * Lab6 Task 1
  *
@@ -29,8 +32,12 @@ void
 fec_init(unsigned char *fecdata, unsigned char *imgseg, int datasize, int segsize)
 {
   /* Lab6: YOUR CODE HERE */
-
-  return;
+  assert(segsize <= datasize);
+  memcpy(fecdata, imgseg, segsize);
+  
+  if (segsize < datasize) {
+    memset(fecdata + segsize, 0, datasize - segsize);
+  }
 }
 
 /*
@@ -44,7 +51,14 @@ void
 fec_accum(unsigned char *fecdata, unsigned char *imgseg, int datasize, int segsize)
 {
   /* Lab6: YOUR CODE HERE */
-
-  return;
+  assert(segsize <= datasize);
+  
+  for (int i = 0; i < segsize; ++i) {
+    fecdata[i] = fecdata[i] ^ imgseg[i];
+  }   
+  
+  for (int j = segsize; j < datasize; ++j) {
+    fecdata[j] = fecdata[j] ^ 0;
+  }
 }
 

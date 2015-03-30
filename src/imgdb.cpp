@@ -301,6 +301,9 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
     msg.msg_controllen = 0;
     msg.msg_flags = 0;
 
+    unsigned char * fec_buff = new unsigned char[datasize];
+    unsigned int fec_seg_num = 0;
+
     do {
       /* size of this segment */
       left = imgsize - snd_next;
@@ -323,6 +326,14 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
        * 3. compute your FEC data across the multiple data segments.
        */
       /* Lab6: YOUR CODE HERE */
+      if (!snd_next) {
+        // Initialize 'fec_buff' b/c this is the first segment we're sending
+        fec_init(fec_buff, (unsigned char *) image, datasize, segsize); 
+      } else {
+        // Accumulate 'image' into 'fec_buff'
+        fec_accum(fec_buff, (unsigned char *) image, datasize, segsize);
+      }
+      ++fec_seg_num;
       
       /* probabilistically drop a segment */
       if (((float) random())/INT_MAX < pdrop) {
@@ -373,11 +384,26 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
        * ih_type field of the header also.
        */
       /* Lab6: YOUR CODE HERE */
+      if (fec_seg_num == this->fwnd || (int) snd_next < imgsize) {
+        fec_seg_num = 0;
+        
+        // Prepare for FEC send
+        ihdr.ih_type = NETIMG_FEC;
+        ihdr.ih_size = htonl(datasize);
+        ihdr.ih_seqn = htonl(snd_next);
+
+        iovec_arr[1].iov_base = (void *) fec_buff;
+        iovec_arr[1].iov_len = datasize;
+
+        // Prepare for DATA send
+        ihdr.ih_type = NETIMG_DATA;
+      }
       
     } while ((int) snd_next < imgsize);
+  
+    delete[] fec_buff;
   }
     
-  return;
 }
 
 /*

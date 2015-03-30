@@ -53,6 +53,11 @@ unsigned short mss;       // receiver's maximum segment size, in bytes
 unsigned char rwnd;       // receiver's window, in packets, of size <= mss
 unsigned char fwnd;       // Lab6: receiver's FEC window < rwnd, in packets
 
+unsigned int nextSeqNo_ = 0;
+unsigned int missingSeqNo_;
+unsigned int numFecSegs_ = 0;
+unsigned int currFecSeqNo_ = 0;
+
 /*
  * netimg_args: parses command line args.
  *
@@ -330,9 +335,32 @@ netimg_recvimg(void)
      * losses, just keep a count of the total number of packets received.
      */
     /* Lab6: YOUR CODE HERE */
+  
+    // Check if we've dropped an FEC pkt 
+    unsigned int datasize = mss - sizeof(ihdr_t) - NETIMG_UDPIP;
+    unsigned int feq_size_bytes = datasize * fwnd; // size of an FEC window in bytes
+    unsigned int next_fec_seq_no = feq_size_bytes + currFecSeqNo_;
+
+    // Check if we've dropped an FEC pkt
+    if (seqn >= next_fec_seq_no) {
+      // We've dropped an FEC pkt, so reset the FEC window to the new packet sequence
+      numFecSegs_ = 0;
+      currFecSeqNo_ = seqn - (seqn % feq_size_bytes);
+      nextSeqNo_ = currFecSeqNo_;
+    }
+
+    // Check if we've dropped a data packet
+    if (seqn != nextSeqNo_) {
+      // We've dropped a data packet, so register the packet as missing
+      missingSeqNo_ = nextSeqNo_;
+    } else {
+      // We've received the proper packet, so update the number of received data packets
+      ++numFecSegs_;
+    }
+
+    nextSeqNo_ = seqn + size;
 
   } else { // FEC pkt
-
     /* Lab6 Task 2
      *
      * Re-use the same struct msghdr above to receive an FEC packet.
@@ -346,6 +374,17 @@ netimg_recvimg(void)
      * This is an adaptation of your Lab5 code.
      */
     /* Lab6: YOUR CODE HERE */
+    unsigned int datasize = mss - sizeof(ihdr_t) - NETIMG_UDPIP;
+    net_assert(datasize != size, "size does not equal datasize");
+
+    unsigned char * fec_buff = new unsigned char[datasize];
+    iovec_arr[1].iov_base = (void *) fec_buff;
+    iovec_arr[1].iov_len = size;
+    int fec_result = recvmsg(sd, &msg, 0);
+    if (fec_result == -1) {
+      net_assert(errno != EAGAIN && errno != EWOULDBLOCK, strerror(errno));
+      return;
+    }
 
     /* Lab6 Task 2
      *
@@ -379,6 +418,34 @@ netimg_recvimg(void)
      * processing of the next window.
      */
     /* Lab6: YOUR CODE HERE */
+
+    // Check if we've received the correct FEC pkt and that we should
+    // reconstruct a single missing pkt
+    if (seqn == nextSeqNo_ && numFecSegs_ == fwnd - 1) {
+      unsigned int last_segment_seqno = img_size - (img_size % datasize);
+      // Use simple XOR magic to recover the missing packet
+      for (unsigned int i = currFecSeqNo_; i < seqn; i += datasize) {
+        if (i != missingSeqNo_) {
+          unsigned int segsize = (seqn == last_segment_seqno)
+              ? img_size % datasize
+              : datasize;
+          fec_accum(fec_buff, image, datasize, segsize);
+        }
+      }
+
+      // Copy the reconstructed packe to its proper place in the image buffer
+      unsigned int missing_segment_size = (missingSeqNo_ == last_segment_seqno)
+          ? img_size - last_segment_seqno
+          : datasize;
+      memcpy(image + missingSeqNo_, fec_buff, missing_segment_size);
+    } 
+    
+    // Reset FEC window
+    numFecSegs_ = 0;
+    nextSeqNo_ = seqn;
+    currFecSeqNo_ = seqn;
+
+    delete[] fec_buff;
   }
   
   /* give the updated image to OpenGL for texturing */
