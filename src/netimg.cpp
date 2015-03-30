@@ -57,6 +57,7 @@ unsigned int nextSeqNo_ = 0;
 unsigned int missingSeqNo_;
 unsigned int numFecSegs_ = 0;
 unsigned int currFecSeqNo_ = 0;
+unsigned int bytesReceived_ = 0;
 
 /*
  * netimg_args: parses command line args.
@@ -300,14 +301,7 @@ netimg_recvimg(void)
     iovec_arr[1].iov_len = size;
 
     result = recvmsg(sd, &msg, 0);
-    if (result == -1) {
-      net_assert(errno != EAGAIN && errno != EWOULDBLOCK, strerror(errno));
-      return;
-    }
-
-
-    fprintf(stderr, "netimg_recvimg: received offset 0x%x, %d bytes\n",
-            seqn, size);
+    net_assert(result == -1, "Failed to read DATA from wire");
 
     /* Lab6 Task 2
      *
@@ -343,22 +337,50 @@ netimg_recvimg(void)
 
     // Check if we've dropped an FEC pkt
     if (seqn >= next_fec_seq_no) {
+      fprintf(stderr, "- we've dropped an FEC pkt!\n");
       // We've dropped an FEC pkt, so reset the FEC window to the new packet sequence
       numFecSegs_ = 0;
       currFecSeqNo_ = seqn - (seqn % feq_size_bytes);
       nextSeqNo_ = currFecSeqNo_;
     }
 
+    bool accumulate_pkt = true;
+
     // Check if we've dropped a data packet
-    if (seqn != nextSeqNo_) {
+    if (seqn > nextSeqNo_) {
+      fprintf(stderr, "- Packets dropped...\n");
+      for (unsigned int i = nextSeqNo_; i < seqn; i += datasize) {
+        unsigned int dropped_pkt_size = (i + datasize > img_size)
+          ? img_size - i 
+          : datasize;
+
+        fprintf(stderr, "\t- packet dropped: offset 0x%x, %d bytes\n",
+            i, dropped_pkt_size);  
+      }
+
       // We've dropped a data packet, so register the packet as missing
       missingSeqNo_ = nextSeqNo_;
-    } else {
-      // We've received the proper packet, so update the number of received data packets
-      ++numFecSegs_;
+
+    
+    } else if (seqn < nextSeqNo_) {
+      fprintf(stderr, "netimg_recvimg: received OUT-OF-ORDER DATA packet: offset 0x%x, %d bytes\n",
+              seqn, size);
+      
+      accumulate_pkt = false;
     }
 
-    nextSeqNo_ = seqn + size;
+    if (accumulate_pkt) {
+      ++numFecSegs_;
+      nextSeqNo_ = seqn + size;
+      
+      fprintf(stderr, "netimg_recvimg: received DATA offset 0x%x, %d bytes ",
+              seqn, size);
+
+      bytesReceived_ += size;
+      fprintf(stderr, "-- nextSeqNo_: 0x%x, missingSeqNo_: 0x%x, currFecSeqNo_: 0x%x, numFecSegs_: %u\n",
+          nextSeqNo_, missingSeqNo_, currFecSeqNo_, numFecSegs_);
+    }
+
 
   } else { // FEC pkt
     /* Lab6 Task 2
@@ -374,17 +396,18 @@ netimg_recvimg(void)
      * This is an adaptation of your Lab5 code.
      */
     /* Lab6: YOUR CODE HERE */
+    fprintf(stderr, "netimg_recvimg: received FEC offset 0x%x, %d bytes\n",
+            seqn, size);
+    
     unsigned int datasize = mss - sizeof(ihdr_t) - NETIMG_UDPIP;
     net_assert(datasize != size, "size does not equal datasize");
 
     unsigned char * fec_buff = new unsigned char[datasize];
+    memset(fec_buff, 0, datasize);
     iovec_arr[1].iov_base = (void *) fec_buff;
     iovec_arr[1].iov_len = size;
     int fec_result = recvmsg(sd, &msg, 0);
-    if (fec_result == -1) {
-      net_assert(errno != EAGAIN && errno != EWOULDBLOCK, strerror(errno));
-      return;
-    }
+    net_assert(fec_result == -1, "Failed to read FEC pkt from wire");
 
     /* Lab6 Task 2
      *
@@ -419,17 +442,36 @@ netimg_recvimg(void)
      */
     /* Lab6: YOUR CODE HERE */
 
+    // Check for skipped data segments
+    unsigned int next_fec_seqno = currFecSeqNo_ + fwnd * datasize;
+    if (seqn == next_fec_seqno) {
+      for (unsigned int i = nextSeqNo_; i < seqn; i += datasize) {
+        missingSeqNo_ = i;
+        unsigned int dropped_pkt_size = (i + datasize > img_size)
+          ? img_size - i 
+          : datasize;
+
+        fprintf(stderr, "\t- packet dropped: offset 0x%x, %d bytes\n",
+            i, dropped_pkt_size);  
+      }
+      nextSeqNo_ = next_fec_seqno;
+    }
+
     // Check if we've received the correct FEC pkt and that we should
     // reconstruct a single missing pkt
     if (seqn == nextSeqNo_ && numFecSegs_ == fwnd - 1) {
       unsigned int last_segment_seqno = img_size - (img_size % datasize);
       // Use simple XOR magic to recover the missing packet
       for (unsigned int i = currFecSeqNo_; i < seqn; i += datasize) {
+        
+        // DOn't XOR the missing segment
         if (i != missingSeqNo_) {
-          unsigned int segsize = (seqn == last_segment_seqno)
+          unsigned int segsize = (i == last_segment_seqno)
               ? img_size % datasize
               : datasize;
-          fec_accum(fec_buff, image, datasize, segsize);
+          fprintf(stderr, "- XOR details: seqn: 0x%x, datasize: %u, segsize: %u\n",
+              i, datasize, segsize);
+          fec_accum(fec_buff, image + i, datasize, segsize);
         }
       }
 
@@ -437,13 +479,20 @@ netimg_recvimg(void)
       unsigned int missing_segment_size = (missingSeqNo_ == last_segment_seqno)
           ? img_size - last_segment_seqno
           : datasize;
+      
+      fprintf(stderr, "- Using FEC simple XOR to recover segment with offset 0x%x and size %d\n",
+          missingSeqNo_, missing_segment_size);
+
       memcpy(image + missingSeqNo_, fec_buff, missing_segment_size);
     } 
-    
+
     // Reset FEC window
     numFecSegs_ = 0;
     nextSeqNo_ = seqn;
     currFecSeqNo_ = seqn;
+    
+    fprintf(stderr, "- Reseting FEC window to numFecSegs_: %u, nextSeqNo_: 0x%x, currFecSeqNo_: 0x%x\n",
+        numFecSegs_, nextSeqNo_, currFecSeqNo_);
 
     delete[] fec_buff;
   }
