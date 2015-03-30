@@ -326,18 +326,17 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
        * 3. compute your FEC data across the multiple data segments.
        */
       /* Lab6: YOUR CODE HERE */
-      if (!snd_next) {
-        // Initialize 'fec_buff' b/c this is the first segment we're sending
-        fec_init(fec_buff, (unsigned char *) image, datasize, segsize); 
+      if (fec_seg_num++ % fwnd) {
+        // This is not the first segment in the FEC window, so accumulate 'image' into 'fec_buff'
+        fec_accum(fec_buff, (unsigned char *) image + snd_next, datasize, segsize);
       } else {
-        // Accumulate 'image' into 'fec_buff'
-        fec_accum(fec_buff, (unsigned char *) image, datasize, segsize);
+        // Initialize 'fec_buff' b/c this is the first segment we're sending
+        fec_init(fec_buff, (unsigned char *) image + snd_next, datasize, segsize); 
       }
-      ++fec_seg_num;
       
       /* probabilistically drop a segment */
       if (((float) random())/INT_MAX < pdrop) {
-        fprintf(stderr, "imgdb_sendimg: DROPPED offset 0x%x, %d bytes\n",
+        fprintf(stderr, "imgdb_sendimg: DROPPED DATA packet with offset 0x%x, 0x%x bytes\n",
                 snd_next, segsize);
       } else { 
         
@@ -351,19 +350,20 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
          */
         /* Lab5: YOUR CODE HERE */
         /* DONE */
-        ihdr.ih_size = htons(segsize);
+        ihdr.ih_size = htons( (unsigned short) segsize);
         ihdr.ih_seqn = htonl(snd_next);
         iovec_arr[1].iov_base = (void *) (ip + snd_next);
         iovec_arr[1].iov_len = segsize;
 
         net_assert(sendmsg(sd, &msg, 0) == -1, "Failed to send message");
         
-        fprintf(stderr, "imgdb_sendimg: sent offset 0x%x, %d bytes\n",
+        fprintf(stderr, "imgdb_sendimg: sent DATA packet with offset 0x%x, %d bytes\n",
                 snd_next, segsize);
         
       }
       
       snd_next += segsize;
+    
       
       /* Lab6 Task 1
        *
@@ -384,19 +384,29 @@ sendimg(int sd, imsg_t *imsg, char *image, long imgsize, int numseg)
        * ih_type field of the header also.
        */
       /* Lab6: YOUR CODE HERE */
-      if (fec_seg_num == this->fwnd || (int) snd_next < imgsize) {
-        fec_seg_num = 0;
-        
-        // Prepare for FEC send
-        ihdr.ih_type = NETIMG_FEC;
-        ihdr.ih_size = htonl(datasize);
-        ihdr.ih_seqn = htonl(snd_next);
+      if (fec_seg_num % fwnd == 0 || (int) snd_next > imgsize) {
+        // Check if we should drops the packet
+        if (((float) random())/INT_MAX < pdrop) {
+          fprintf(stderr, "imgdb_sendimg: DROPPED FEC packet with offset 0x%x, 0x%x bytes\n",
+                  snd_next, segsize);
+        } else {
+          // Prepare for FEC send
+          ihdr.ih_type = NETIMG_FEC | NETIMG_DATA;
+          ihdr.ih_size = htons( (unsigned short) datasize);
+          ihdr.ih_seqn = htonl(snd_next);
 
-        iovec_arr[1].iov_base = (void *) fec_buff;
-        iovec_arr[1].iov_len = datasize;
+          iovec_arr[1].iov_base = (void *) fec_buff;
+          iovec_arr[1].iov_len = datasize;
+          
+          fprintf(stderr, "imgdb_sendimg: sent FEC packet with offset 0x%x, %d bytes\n",
+                  snd_next, segsize);
 
-        // Prepare for DATA send
-        ihdr.ih_type = NETIMG_DATA;
+          int fec_send_result = sendmsg(sd, &msg, 0);
+          net_assert(fec_send_result == -1, "Failed to send FEC to client");
+
+          // Prepare for DATA send
+          ihdr.ih_type = NETIMG_DATA;
+        }
       }
       
     } while ((int) snd_next < imgsize);
